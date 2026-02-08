@@ -27,8 +27,11 @@ function MockAPIBuilder() {
 
   const loadEndpoints = async (currentSelected = null) => {
     try {
+      console.log('loadEndpoints - Fetching endpoints...')
       const data = await getEndpoints()
       const endpointsList = Array.isArray(data) ? data : []
+      console.log('loadEndpoints - Fetched', endpointsList.length, 'endpoints:', endpointsList.map(e => `${e.method} ${e.name} (${e.id})`))
+      
       setEndpoints(endpointsList)
       
       // Use the passed parameter or state to check for selected endpoint
@@ -38,22 +41,22 @@ function MockAPIBuilder() {
       if (selected && selected.id) {
         const updated = endpointsList.find(e => e && e.id === selected.id)
         if (updated) {
-          // Always update to ensure we have latest data
-          const currentDataLength = (selected.data || []).length
-          const updatedDataLength = (updated.data || []).length
-          
-          // Always update if data changed - use deep comparison
-          const currentDataStr = JSON.stringify((selected.data || []).map(r => r?.id).sort())
-          const updatedDataStr = JSON.stringify((updated.data || []).map(r => r?.id).sort())
-          
-          if (currentDataStr !== updatedDataStr || currentDataLength !== updatedDataLength) {
-            console.log('🔄 Data changed:', updated.name, currentDataLength, '->', updatedDataLength)
-            console.log('🔄 Updated data sample:', updated.data?.[0])
-            setSelectedEndpoint({ ...updated })
-          }
+          console.log('loadEndpoints - Found selected endpoint in list:', updated.name)
+          // Always update to ensure we have latest data (fields, etc.)
+          setSelectedEndpoint({ ...updated })
         } else {
+          console.warn('loadEndpoints - Selected endpoint not found in list:', selected.id, selected.name)
           // Selected endpoint was deleted, clear selection
           setSelectedEndpoint(null)
+        }
+      } else if (currentSelected && currentSelected.id) {
+        // New endpoint was just created, try to find it
+        const found = endpointsList.find(e => e && e.id === currentSelected.id)
+        if (found) {
+          console.log('loadEndpoints - Found newly created endpoint:', found.name)
+          setSelectedEndpoint(found)
+        } else {
+          console.error('loadEndpoints - Newly created endpoint not found!', currentSelected.id, 'Available IDs:', endpointsList.map(e => e.id))
         }
       }
     } catch (error) {
@@ -91,13 +94,17 @@ function MockAPIBuilder() {
     loadData()
     
     // Auto-refresh every 2 seconds to sync with backend/Postman
+    // But don't overwrite selectedEndpoint if user just created one
     const interval = setInterval(() => {
-      loadEndpoints()
-      loadTables()
+      // Only refresh if we're not in the middle of creating an endpoint
+      if (!showForm && !editingEndpoint) {
+        loadEndpoints()
+        loadTables()
+      }
     }, 2000)
     
     return () => clearInterval(interval)
-  }, []) // Run on mount only - don't refresh on selection changes to avoid conflicts
+  }, [showForm, editingEndpoint]) // Re-run if form state changes
   
   // Sync existing endpoints to backend on mount
   useEffect(() => {
@@ -133,9 +140,46 @@ function MockAPIBuilder() {
       }
       
       // Reload endpoints and tables to reflect associations
+      console.log('handleCreateEndpoint - Created endpoint:', resultEndpoint.id, resultEndpoint.name)
+      console.log('handleCreateEndpoint - Reloading endpoints...')
+      
+      // Wait a moment for backend to fully persist
+      await new Promise(resolve => setTimeout(resolve, 300))
+      
+      // Reload endpoints - this should fetch from backend and include the new endpoint
       await loadEndpoints(resultEndpoint)
+      
+      // Verify the endpoint is in the list
+      const allEndpoints = await getEndpoints()
+      const found = allEndpoints.find(e => e && e.id === resultEndpoint.id)
+      console.log('handleCreateEndpoint - Endpoint in list?', found ? 'YES' : 'NO', 'Total endpoints:', allEndpoints.length)
+      
+      if (!found) {
+        console.error('handleCreateEndpoint - WARNING: Created endpoint not found in list!')
+        console.error('handleCreateEndpoint - Created ID:', resultEndpoint.id)
+        console.error('handleCreateEndpoint - Available IDs:', allEndpoints.map(e => e?.id))
+        // Try one more time after a longer delay
+        await new Promise(resolve => setTimeout(resolve, 500))
+        const retryEndpoints = await getEndpoints()
+        const retryFound = retryEndpoints.find(e => e && e.id === resultEndpoint.id)
+        if (retryFound) {
+          console.log('handleCreateEndpoint - Found on retry!')
+          setEndpoints(retryEndpoints)
+          setSelectedEndpoint(retryFound)
+        } else {
+          console.error('handleCreateEndpoint - Still not found after retry')
+          // Still set it so user can see it, and update endpoints list
+          setEndpoints([...allEndpoints, resultEndpoint])
+          setSelectedEndpoint(resultEndpoint)
+        }
+      } else {
+        // Found it, use the one from the list and ensure it's in the endpoints state
+        console.log('handleCreateEndpoint - Endpoint found, updating state')
+        setEndpoints(allEndpoints)
+        setSelectedEndpoint(found)
+      }
+      
       await loadTables()
-      setSelectedEndpoint(resultEndpoint)
       setShowForm(false)
     } catch (error) {
       console.error('Error creating/updating endpoint:', error)

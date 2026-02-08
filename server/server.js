@@ -11,24 +11,6 @@ const __dirname = dirname(__filename);
 const app = express();
 app.use(cors());
 
-// Capture raw body for debugging (before JSON parser)
-app.use((req, res, next) => {
-  if (req.method === 'POST' || req.method === 'PUT') {
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk.toString();
-    });
-    req.on('end', () => {
-      req.rawBody = data;
-      console.log('Raw body captured:', data);
-      console.log('Raw body length:', data.length);
-      next();
-    });
-  } else {
-    next();
-  }
-});
-
 // Increase JSON body parser limit and ensure it handles all content types
 app.use(express.json({ limit: '10mb', strict: false }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -189,6 +171,12 @@ app.post('/api/endpoints', (req, res) => {
     const createdAt = new Date().toISOString();
     
     console.log('POST /api/endpoints - Creating endpoint:', { endpointId, name, path, method, tableId });
+    console.log('POST /api/endpoints - Fields received:', JSON.stringify(fields, null, 2));
+    console.log('POST /api/endpoints - Fields count:', fields?.length);
+    if (fields && fields.length > 0) {
+      console.log('POST /api/endpoints - First field:', JSON.stringify(fields[0], null, 2));
+      console.log('POST /api/endpoints - First field has filterable?', fields[0].hasOwnProperty('filterable'), fields[0].filterable);
+    }
     
     // Check if endpoint already exists
     const existing = db.prepare('SELECT * FROM endpoints WHERE id = ?').get(endpointId);
@@ -208,6 +196,16 @@ app.post('/api/endpoints', (req, res) => {
       INSERT INTO endpoints (id, name, path, method, fields, createdAt)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(endpointId, name, path, method, JSON.stringify(fields || []), createdAt);
+    
+    console.log('POST /api/endpoints - Endpoint saved to database:', endpointId);
+    
+    // Verify the endpoint was saved
+    const saved = db.prepare('SELECT * FROM endpoints WHERE id = ?').get(endpointId);
+    if (saved) {
+      console.log('POST /api/endpoints - Verified endpoint in database:', saved.id, saved.name);
+    } else {
+      console.error('POST /api/endpoints - ERROR: Endpoint not found in database after insert!');
+    }
     
     // Associate with table if provided
     if (tableId) {
@@ -540,7 +538,44 @@ app.all('/api/*', (req, res) => {
   
   // Handle different HTTP methods
   if (method === 'GET') {
-    const dataRows = db.prepare('SELECT * FROM endpoint_data WHERE endpoint_id = ? ORDER BY created_at DESC').all(endpoint.id);
+    // For GET requests, also check if this endpoint is associated with a table
+    // If so, get data from all endpoints associated with that table
+    let endpointIds = [endpoint.id];
+    
+    const tableAssociations = db.prepare(`
+      SELECT table_id FROM table_endpoints WHERE endpoint_id = ?
+    `).all(endpoint.id);
+    
+    console.log('GET - Endpoint ID:', endpoint.id, 'Path:', endpoint.path, 'Method:', endpoint.method);
+    console.log('GET - Table associations:', tableAssociations.length);
+    
+    if (tableAssociations.length > 0) {
+      // This endpoint is associated with a table, get all endpoints for that table
+      const tableId = tableAssociations[0].table_id;
+      const allTableEndpoints = db.prepare(`
+        SELECT endpoint_id FROM table_endpoints WHERE table_id = ?
+      `).all(tableId);
+      endpointIds = allTableEndpoints.map(row => row.endpoint_id);
+      console.log('GET - Endpoint associated with table', tableId, ', fetching data from', endpointIds.length, 'endpoints:', endpointIds);
+    } else {
+      console.log('GET - Endpoint not associated with any table, using only endpoint', endpoint.id);
+    }
+    
+    // Get data from all relevant endpoints
+    const placeholders = endpointIds.map(() => '?').join(',');
+    const dataRows = db.prepare(`
+      SELECT * FROM endpoint_data 
+      WHERE endpoint_id IN (${placeholders}) 
+      ORDER BY created_at DESC
+    `).all(...endpointIds);
+    
+    console.log('GET - Found', dataRows.length, 'data rows from', endpointIds.length, 'endpoint(s)');
+    if (dataRows.length === 0 && endpointIds.length === 1) {
+      console.log('GET - No data found. Checking if endpoint', endpointIds[0], 'has any data...');
+      const checkData = db.prepare('SELECT COUNT(*) as count FROM endpoint_data WHERE endpoint_id = ?').get(endpointIds[0]);
+      console.log('GET - Data count for endpoint', endpointIds[0], ':', checkData.count);
+    }
+    
     let data = dataRows.map(row => {
       try {
         // The data field already contains the full record with id and createdAt
@@ -575,13 +610,25 @@ app.all('/api/*', (req, res) => {
         // Check if record matches all query parameters
         return Object.keys(queryParams).every(paramName => {
           // Only allow filtering by fields marked as filterable
-          if (filterableFields.length > 0 && !filterableFields.includes(paramName)) {
+          // Check filterable fields case-insensitively
+          const paramNameLower = paramName.toLowerCase();
+          const isFilterable = filterableFields.length === 0 || filterableFields.some(f => f.toLowerCase() === paramNameLower);
+          
+          if (filterableFields.length > 0 && !isFilterable) {
             console.log(`Field "${paramName}" is not filterable. Allowed fields: ${filterableFields.join(', ')}`);
             return true; // Ignore non-filterable params, don't filter them out
           }
           
           const paramValue = queryParams[paramName];
-          const recordValue = record[paramName];
+          
+          // Find the record field by case-insensitive matching
+          const recordKey = Object.keys(record).find(key => key.toLowerCase() === paramNameLower);
+          if (!recordKey) {
+            console.log(`Field "${paramName}" not found in record. Available keys: ${Object.keys(record).join(', ')}`);
+            return false; // Field doesn't exist in record
+          }
+          
+          const recordValue = record[recordKey];
           
           // Handle different types of comparisons
           if (recordValue === null || recordValue === undefined) {
@@ -598,11 +645,18 @@ app.all('/api/*', (req, res) => {
         });
       });
       console.log(`Filtered ${dataRows.length} records to ${data.length} matching query params`);
+      if (data.length === 0 && dataRows.length > 0) {
+        console.log('⚠️ WARNING: All records filtered out!');
+        console.log('  - Query params:', queryParams);
+        console.log('  - Filterable fields:', filterableFields);
+        console.log('  - First record sample:', JSON.stringify(dataRows[0]?.data ? JSON.parse(dataRows[0].data) : null, null, 2));
+      }
     }
     
     // Log the GET request
     const logId = Date.now().toString();
     const logCreatedAt = new Date().toISOString();
+    console.log('GET request - Returning', data.length, 'records');
     db.prepare(`
       INSERT INTO request_logs (id, endpoint_id, endpoint_path, method, request_body, response_status, response_data, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -611,50 +665,18 @@ app.all('/api/*', (req, res) => {
     res.json(data);
   } 
   else if (method === 'POST' || method === 'PUT') {
-    // Debug: Check raw body and headers first
     console.log('POST/PUT - Content-Type:', req.get('Content-Type'));
     console.log('POST/PUT - Content-Length:', req.get('Content-Length'));
-    console.log('POST/PUT - Raw req.body:', req.body);
+    console.log('POST/PUT - req.body:', req.body);
     console.log('POST/PUT - req.body type:', typeof req.body);
     console.log('POST/PUT - req.body keys:', Object.keys(req.body || {}));
     
-    // Capture request body - ensure we have the actual body data
-    let requestBody = req.body || {};
+    const requestBody = req.body || {};
     
-    // If body is empty but we have raw body data, try to parse it
-    if ((!requestBody || Object.keys(requestBody).length === 0) && req.rawBody) {
-      console.log('POST/PUT - req.body is empty, trying to parse rawBody:', req.rawBody);
-      try {
-        if (req.rawBody && req.rawBody.trim()) {
-          requestBody = JSON.parse(req.rawBody);
-          console.log('POST/PUT - Successfully parsed raw body:', requestBody);
-          // Update req.body so validation works
-          req.body = requestBody;
-        }
-      } catch (e) {
-        console.error('POST/PUT - Error parsing raw body:', e);
-        console.error('POST/PUT - Raw body content:', req.rawBody);
-      }
-    }
-    
-    // Final check - if still empty, log warning
     if (Object.keys(requestBody).length === 0) {
       console.warn('POST/PUT - WARNING: Request body is empty!');
-      console.warn('POST/PUT - This might be a body parsing issue. Check Content-Type header.');
-      console.warn('POST/PUT - Trying to read raw body stream...');
-      
-      // Try to manually read the body if Express parser didn't work
-      // This should not be needed if express.json() is working, but as a fallback
-      if (!req.body || Object.keys(req.body).length === 0) {
-        // Body parser should have already parsed it, but if not, we can't read it again
-        // The stream is already consumed. This is just for debugging.
-        console.warn('POST/PUT - Cannot read body stream again (already consumed by middleware)');
-      }
+      console.warn('POST/PUT - This might be a body parsing issue. Check Content-Type header in Postman.');
     }
-    
-    // Use requestBody (which might be from req.body or parsed from rawBody)
-    // Update req.body to use our parsed version
-    req.body = requestBody;
     
     // Validate required fields
     const missing = fields.filter(f => f.required && !requestBody[f.name]);

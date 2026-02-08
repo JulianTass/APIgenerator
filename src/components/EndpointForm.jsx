@@ -1,24 +1,58 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { X, Plus, Trash2, Database, Download } from 'lucide-react'
 
 const FIELD_TYPES = ['string', 'number', 'boolean', 'date', 'object', 'array']
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE']
 
 function EndpointForm({ onSubmit, onCancel, tables = [], initialData = null }) {
+  // Track if user has manually changed the table selection
+  const hasManualTableChange = useRef(false);
+  // Track the endpoint ID we initialized with
+  const initializedEndpointId = useRef(null);
+  
   // Find which table this endpoint is associated with (if editing)
-  const associatedTableId = initialData ? (() => {
+  const getAssociatedTableId = () => {
+    if (!initialData) return '';
     // Check if this endpoint is associated with any table
     const table = tables.find(t => t.endpoints?.some(e => e.id === initialData.id));
     return table?.id || '';
-  })() : '';
+  };
   
-  const [formData, setFormData] = useState({
+  // Initialize formData only once when component mounts or endpoint changes
+  const getInitialTableId = () => {
+    if (!initialData) return '';
+    const table = tables.find(t => t.endpoints?.some(e => e.id === initialData.id));
+    return table?.id || '';
+  };
+  
+  const [formData, setFormData] = useState(() => ({
     name: initialData?.name || '',
     path: initialData?.path || '',
     method: initialData?.method || 'GET',
     fields: initialData?.fields || [],
-    tableId: associatedTableId || '' // Add table association
-  });
+    tableId: getInitialTableId() || ''
+  }));
+  
+  // Only initialize once when endpoint ID changes (form opened with different endpoint)
+  useEffect(() => {
+    if (initialData?.id && initialData.id !== initializedEndpointId.current) {
+      // New endpoint - reset everything
+      initializedEndpointId.current = initialData.id;
+      hasManualTableChange.current = false;
+      
+      const newTableId = getAssociatedTableId();
+      setFormData(prev => ({
+        name: initialData.name || '',
+        path: initialData.path || '',
+        method: initialData.method || 'GET',
+        fields: initialData.fields || [],
+        tableId: newTableId || ''
+      }));
+    }
+  }, [initialData?.id]); // Only run when endpoint ID changes
+  
+  // NEVER update formData from tables prop changes - user's selection takes precedence
+  // The tables prop can change due to auto-refresh, but we don't want to overwrite user's selection
 
   const [errors, setErrors] = useState({})
 
@@ -105,6 +139,7 @@ function EndpointForm({ onSubmit, onCancel, tables = [], initialData = null }) {
             <select
               value={formData.tableId}
               onChange={(e) => {
+                hasManualTableChange.current = true; // Mark as manually changed
                 setFormData({
                   ...formData,
                   tableId: e.target.value

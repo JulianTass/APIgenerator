@@ -184,6 +184,17 @@ export const createEndpoint = async (endpoint) => {
   const available = await checkBackend();
   if (available) {
     try {
+      // Ensure all field properties are included, especially filterable
+      const fieldsToSend = (newEndpoint.fields || []).map(field => ({
+        name: field.name,
+        type: field.type,
+        required: field.required || false,
+        format: field.format || '',
+        filterable: field.filterable || false // Ensure filterable is included
+      }));
+      
+      console.log('createEndpoint - Sending fields to backend:', JSON.stringify(fieldsToSend, null, 2));
+      
       const response = await fetch(`${BACKEND_URL}/api/endpoints`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -192,7 +203,7 @@ export const createEndpoint = async (endpoint) => {
           name: newEndpoint.name,
           path: normalizePath(newEndpoint.path),
           method: newEndpoint.method,
-          fields: newEndpoint.fields || [],
+          fields: fieldsToSend,
           tableId: endpoint.tableId || null // Include table association
         })
       });
@@ -226,6 +237,17 @@ export const updateEndpoint = async (endpointId, updates) => {
   const available = await checkBackend();
   if (available) {
     try {
+      // Ensure all field properties are included, especially filterable
+      const fieldsToSend = (updates.fields || []).map(field => ({
+        name: field.name,
+        type: field.type,
+        required: field.required || false,
+        format: field.format || '',
+        filterable: field.filterable || false // Ensure filterable is included
+      }));
+      
+      console.log('updateEndpoint - Sending fields to backend:', JSON.stringify(fieldsToSend, null, 2));
+      
       const response = await fetch(`${BACKEND_URL}/api/endpoints/${endpointId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -233,7 +255,7 @@ export const updateEndpoint = async (endpointId, updates) => {
           name: updates.name,
           path: updates.path,
           method: updates.method,
-          fields: updates.fields || [],
+          fields: fieldsToSend,
           tableId: updates.tableId || null // Include table association
         })
       });
